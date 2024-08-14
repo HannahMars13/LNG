@@ -1,0 +1,278 @@
+---
+title: "LNG Vessel Trip Analysis"
+author: "Hannah Marszalek"
+date: "2024-08-08"
+output:
+  html_document:
+    theme: flatly
+---
+
+A note about this code: Some of the functions were written with the help of ChatGPT. While the program seems to work for the majority of the journeys, there are some that do not seem to get processed properly.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Setting up
+
+```{r message=FALSE}
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(sf)
+library(ggplot2)
+library(lubridate)
+library(geosphere)
+library(gt)
+```
+
+### Loading in the data
+
+```{r message=FALSE, warning=FALSE}
+#ship coordinates and timestamps
+all_2017 <- read_csv("data/all_2017.csv") %>% 
+  select(IMO, LAT, LON, TIMESTAMP) %>% 
+  distinct()
+
+all_23_24 <- read_excel("data/lng_vessels_23_24.xlsx") %>% 
+  select(IMO, LAT, LON, TIMESTAMP) %>% 
+  distinct()
+
+all_23_24$TIMESTAMP <- as.Date(all_23_24$TIMESTAMP)
+
+#foreign port coordinates
+port_coords <- read_csv("data/lng_ports_updated.csv") %>% 
+  clean_names()
+
+port_coords$lat <- as.numeric(port_coords$lat)
+port_coords$lon <- as.numeric(port_coords$lon)
+
+port_coords <- port_coords %>% 
+  rename("LON" = "lon",
+         "LAT" = "lat")
+
+#ship identifying numbers
+imo <- read_excel("data/lng_imo_values.xlsx") %>% 
+  rename("tanker" = "Complete List of US Export LNG Vessels",
+         "IMO" = "IMO Numbers corresponding to vessels in column A")
+
+#ship departure info
+lng_info_2017 <- read_excel("data/lng_info_2017.xlsx") %>% 
+  clean_names() %>% 
+  mutate(arrival_departure_date = as.Date(arrival_departure_date)) %>% 
+  rename("departure_date" = "arrival_departure_date")
+
+lng_info_2017 <- lng_info_2017 %>% 
+  left_join(imo, by="tanker") %>% 
+  select(departure_date, tanker, country, IMO)
+
+lng_info_23_24 <- read_excel("data/lng_info_23_24.xlsx") %>% 
+  clean_names() %>% 
+  mutate(arrival_departure_date = as.Date(arrival_departure_date)) %>% 
+  rename("departure_date" = "arrival_departure_date")
+
+lng_info_23_24 <- lng_info_23_24 %>% 
+  left_join(imo, by="tanker") %>% 
+  select(departure_date, tanker, country, IMO)
+```
+
+### Defining the main trip duration-calculating function
+
+```{r}
+calculate_trip_durations <- function(all_positions, trip_info, port_coords, distance_threshold = 111000) {
+
+  # Function to find the nearest port
+  find_nearest_port <- function(lat, lon, ports) {
+    distances <- distm(c(lon, lat), ports[, c("LON", "LAT")], fun = distHaversine)
+    nearest_port <- ports[which.min(distances), ]
+    return(nearest_port)
+  }
+
+  # Initialize a data frame to store trip durations
+  trip_durations <- data.frame(IMO = character(), departure_date = character(), arrival_date = character(), duration_days = numeric())
+
+  # Loop through each trip in trip_info
+  for (i in 1:nrow(trip_info)) {
+    trip <- trip_info[i, ]
+    
+    # Get departure date and IMO
+    departure_date <- ymd(trip$departure_date)
+    IMO <- trip$IMO
+    destination_country <- trip$country
+    
+    # Filter positional data for the ship and after the departure date
+    ship_positions <- all_positions %>% filter(IMO == IMO & TIMESTAMP >= departure_date)
+    
+    # Check if ship_positions is empty
+    if (nrow(ship_positions) == 0) {
+      next
+    }
+    
+    # Get the coordinates of the destination port
+    destination_ports <- port_coords %>% filter(country == destination_country)
+    
+    # Check if destination_ports is empty
+    if (nrow(destination_ports) == 0) {
+      next
+    }
+    
+    # Find the arrival date
+    arrival_date <- NA
+    for (j in 1:nrow(ship_positions)) {
+      position <- ship_positions[j, ]
+      nearest_port <- find_nearest_port(position$LAT, position$LON, destination_ports)
+      
+      # Ensure nearest_port has the correct columns
+      if (!all(c("LON", "LAT") %in% names(nearest_port))) {
+        next
+      }
+      
+      distance_to_port <- distHaversine(c(position$LON, position$LAT), c(nearest_port$LON, nearest_port$LAT))
+      
+      # Assume the ship arrives if it is within the specified distance threshold
+      if (distance_to_port < distance_threshold) {
+        arrival_date <- position$TIMESTAMP
+        break
+      }
+    }
+    
+    # Calculate trip duration
+    if (!is.na(arrival_date)) {
+      duration_days <- as.numeric(difftime(arrival_date, departure_date, units = "days"))
+      trip_durations <- rbind(trip_durations, data.frame(IMO = IMO, departure_date = departure_date, arrival_date = arrival_date, duration_days = duration_days))
+    }
+  }
+  
+  # Exclude trips that were zero days long and calculate the average trip duration
+  non_zero_trip_durations <- trip_durations %>% filter(duration_days > 0)
+  average_trip_duration <- mean(non_zero_trip_durations$duration_days, na.rm = TRUE)
+  
+  return(list(trip_durations = trip_durations, average_trip_duration = average_trip_duration))
+}
+
+```
+
+## Comparison of overall 2017 and 2023-24 averages
+
+```{r}
+all_2017_trip_durations <- calculate_trip_durations(all_2017, lng_info_2017, port_coords, distance_threshold = 111000)
+all_23_24_trip_durations <- calculate_trip_durations(all_23_24, lng_info_23_24, port_coords, distance_threshold = 111000)
+
+cat("On average, a trip in 2017 took", all_2017_trip_durations$average_trip_duration, "days, and a trip between April 2023 and March 2024 took", all_23_24_trip_durations$average_trip_duration, "days.")
+```
+
+## Comparison by Continent
+
+LNG vessels appear to have traveled to more countries in Asia, Europe, and North/South America in 2023 and 2024 compared to 2017. Here is the list of countries:
+
+Asia (2017)
+Japan, Jordan, India, China, Turkey, Kuwait, South Korea, Pakistan, Thailand, United Arab Emirates, Taiwan, Egypt (included as part of Asia because it was the only technically African country and it is often geographically associated with Asia) 
+Asia (2023-24)
+Kuwait, South Korea, India, Japan, Turkey, Taiwan, China, Thailand, Bangladesh, Singapore, Jordan, Indonesia, Philippines, Pakistan
+
+Europe (2017)
+Spain, Malta, Portugal, Netherlands, Poland, Italy, United Kingdom, Lithuania 
+Europe (2023-24)
+Netherlands, Belgium, France, Croatia, Spain, United Kingdom, Poland, Germany, Greece, Portugal, Italy, Lithuania, Finland
+
+Americas (2017)
+Mexico, Chile, Dominican Republic, Argentina, Brazil 
+Americas (2023-24)
+Dominican Republic, Brazil, Argentina, Chile, Jamaica, Colombia, Panama, Mexico, El Salvador
+
+### Asia
+
+```{r}
+asia_2017 <- lng_info_2017 %>% 
+  filter(country == "Japan"|country == "Jordan"|country == "India"|country == "China"|country == "Turkiye"|country == "Kuwait"|country == "South Korea"|country == "Pakistan"|country == "Thailand"|country == "United Arab Emirates"|country == "Taiwan"|country == "Egypt")
+
+asia_23_24 <- lng_info_23_24 %>% 
+  filter(country == "Kuwait"|country == "South Korea"|country == "India"|country == "Japan"|country == "Turkiye"|country == "Taiwan"|country == "China"|country == "Thailand"|country == "Bangladesh"|country == "Singapore"|country == "Jordan"|country == "Indonesia"|country == "Philippines"|country == "Pakistan")
+
+asia_2017_trip_durations <- calculate_trip_durations(all_2017, asia_2017, port_coords, distance_threshold = 111000)
+asia_23_24_trip_durations <- calculate_trip_durations(all_23_24, asia_23_24, port_coords, distance_threshold = 111000)
+
+cat("For trips to Asia, the average length in 2017 was", asia_2017_trip_durations$average_trip_duration, "days, and the average length between April 2023 and March 2024 was", asia_23_24_trip_durations$average_trip_duration, "days.")
+```
+
+### Europe
+
+```{r}
+europe_2017 <- lng_info_2017 %>% 
+  filter(country == "Spain"|country == "Malta"|country == "Portugal"|country == "Netherlands"|country == "Poland"|country == "Italy"|country == "United Kingdom"|country == "Lithuania")
+
+europe_23_24 <- lng_info_23_24 %>% 
+  filter(country == "Netherlands"|country == "Belgium"|country == "France"|country == "Croatia"|country == "Spain"|country == "United Kingdom"|country == "Poland"|country == "Germany"|country == "Greece"|country == "Portugal"|country == "Italy"|country == "Lithuania"|country == "Finland")
+
+europe_2017_trip_durations <- calculate_trip_durations(all_2017, europe_2017, port_coords, distance_threshold = 111000)
+europe_23_24_trip_durations <- calculate_trip_durations(all_23_24, europe_23_24, port_coords, distance_threshold = 111000)
+
+cat("For trips to Europe, the average length in 2017 was", europe_2017_trip_durations$average_trip_duration, "days, and the average length between April 2023 and March 2024 was", europe_23_24_trip_durations$average_trip_duration, "days.")
+```
+
+### North and South America
+
+```{r}
+americas_2017 <- lng_info_2017 %>% 
+  filter(country == "Mexico"|country == "Chile"|country == "Dominican Republic"|country == "Argentina"|country == "Brazil")
+
+americas_23_24 <- lng_info_23_24 %>% 
+  filter(country == "Dominican Republic"|country == "Brazil"|country == "Argentina"|country == "Chile"|country == "Jamaica"|country == "Colombia"|country == "Panama"|country == "Mexico"|country == "El Salvador")
+
+americas_2017_trip_durations <- calculate_trip_durations(all_2017, americas_2017, port_coords, distance_threshold = 111000)
+americas_23_24_trip_durations <- calculate_trip_durations(all_23_24, americas_23_24, port_coords, distance_threshold = 111000)
+
+cat("For trips to North and South America, the average length in 2017 was", americas_2017_trip_durations$average_trip_duration, "days, and the average length between April 2023 and March 2024 was", americas_23_24_trip_durations$average_trip_duration, "days.")
+```
+
+## The Longest Trips
+
+```{r}
+trips_2017 <- as.data.frame(all_2017_trip_durations$trip_durations)
+
+top_five_2017 <- trips_2017 %>% 
+  arrange(desc(duration_days)) %>% 
+  head(10)
+
+top_five_2017 %>% 
+  gt() %>% 
+  cols_label(departure_date = "Departure from US",
+             arrival_date = "Arrival at Foreign Port",
+             duration_days = "Length of Trip (Days)") %>% 
+  tab_header(title = "Top 10 Longest Trips of 2017") %>% 
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_title(groups = "title")) %>%
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_column_labels())
+```
+
+```{r}
+trips_23_24 <- as.data.frame(all_23_24_trip_durations$trip_durations)
+
+top_five_23_24 <- trips_23_24 %>% 
+  arrange(desc(duration_days)) %>% 
+  head(10)
+
+top_five_23_24 %>% 
+  gt() %>% 
+  cols_label(departure_date = "Departure from US",
+             arrival_date = "Arrival at Foreign Port",
+             duration_days = "Length of Trip (Days)") %>% 
+  tab_header(title = "Top 10 Longest Trips from April 2023 to March 2024") %>% 
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_title(groups = "title")) %>%
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_column_labels())
+```
