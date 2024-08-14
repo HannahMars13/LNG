@@ -7,7 +7,7 @@ output:
     theme: flatly
 ---
 
-A note about this code: Some of the functions were written with the help of ChatGPT. While the program seems to work for the majority of the journeys, there are some that do not seem to get processed properly.
+A note about this code: The main function was written with the help of ChatGPT. While the program seems to work for the majority of the journeys, there are some that do not seem to get processed properly, for they will come up as being zero days long or being more than 100 days long.
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -144,6 +144,7 @@ calculate_trip_durations <- function(all_positions, trip_info, port_coords, dist
   }
   
   # Exclude trips that were zero days long and calculate the average trip duration
+  # May also add filter for duration_days < 100
   non_zero_trip_durations <- trip_durations %>% filter(duration_days > 0)
   average_trip_duration <- mean(non_zero_trip_durations$duration_days, na.rm = TRUE)
   
